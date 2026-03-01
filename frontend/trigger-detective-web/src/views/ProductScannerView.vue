@@ -2,14 +2,20 @@
 import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { api } from '@/services/api'
+import { useSettingsStore } from '@/stores/settings'
 import { useToastStore } from '@/stores/toast'
 import type { ProductScanResultDto, ScannedIngredientDto } from '@/types'
 import { SafetyRating } from '@/types'
 import Icons from '@/components/icons/Icons.vue'
 import ReadAloudButton from '@/components/voice/ReadAloudButton.vue'
+import { useNarrationBuilder } from '@/composables/useNarrationBuilder'
+import { useCamera } from '@/composables/useCamera'
 
 const { t } = useI18n()
+const { buildProductNarration } = useNarrationBuilder()
+const settingsStore = useSettingsStore()
 const toastStore = useToastStore()
+const camera = useCamera()
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const selectedFile = ref<File | null>(null)
@@ -66,7 +72,7 @@ async function scanProduct() {
   scanResult.value = null
 
   try {
-    const result = await api.scanProductLabel(selectedFile.value)
+    const result = await api.scanProductLabel(selectedFile.value, settingsStore.useLocalAi)
     scanResult.value = result
 
     if (!result.success) {
@@ -112,13 +118,7 @@ function ratingLabel(rating: SafetyRating): string {
 
 const readbackText = computed(() => {
   if (!scanResult.value?.success) return ''
-  const r = scanResult.value
-  const productName = r.productName ? `${r.productName}. ` : ''
-  const headline = r.headline
-  const warnings = r.warnings.length > 0
-    ? ' Warnings: ' + r.warnings.join('. ')
-    : ''
-  return `${productName}${headline}. ${r.explanation}${warnings}`
+  return buildProductNarration(scanResult.value)
 })
 
 function ingredientIcon(ingredient: ScannedIngredientDto): string {
@@ -127,6 +127,18 @@ function ingredientIcon(ingredient: ScannedIngredientDto): string {
     case SafetyRating.Yellow: return '!'
     case SafetyRating.Red: return '&#10007;'
     default: return '-'
+  }
+}
+
+function openCamera() {
+  camera.open()
+}
+
+function capturePhoto() {
+  const file = camera.capture()
+  if (file) {
+    selectFile(file)
+    camera.close()
   }
 }
 </script>
@@ -140,6 +152,15 @@ function ingredientIcon(ingredient: ScannedIngredientDto): string {
         {{ t('scanner.title') }}
       </h1>
       <p class="mt-1 text-text-muted">{{ t('scanner.subtitle') }}</p>
+      <p v-if="settingsStore.useLocalAi" class="text-xs text-accent mt-0.5">
+        {{ t('chat.localMode') }}
+      </p>
+    </div>
+
+    <!-- Local AI quality warning -->
+    <div v-if="settingsStore.useLocalAi" class="flex items-start gap-2 px-3 py-2 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-sm text-yellow-700 dark:text-yellow-400">
+      <span class="shrink-0 mt-0.5">&#9888;</span>
+      <span>{{ t('scanner.localWarning') }}</span>
     </div>
 
     <!-- Result View -->
@@ -305,27 +326,91 @@ function ingredientIcon(ingredient: ScannedIngredientDto): string {
         </button>
       </div>
 
-      <!-- Empty state - drop zone -->
-      <div
-        v-else
-        @click="openFilePicker"
-        @dragover.prevent="isDragging = true"
-        @dragleave="isDragging = false"
-        @drop.prevent="handleDrop"
-        :class="[
-          'border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-all',
-          isDragging
-            ? 'border-primary bg-primary/5'
-            : 'border-border hover:border-primary/50 hover:bg-primary/5'
-        ]"
-      >
-        <div class="mb-4 mx-auto w-16 h-16 bg-primary/10 rounded-xl flex items-center justify-center text-primary">
-          <Icons name="scanner" :size="32" />
+      <!-- Empty state - camera + upload buttons -->
+      <div v-else class="space-y-4">
+        <div class="flex gap-3">
+          <!-- Camera button -->
+          <button
+            v-if="camera.isAvailable"
+            @click="openCamera"
+            class="flex-1 border-2 border-dashed border-border rounded-lg p-6 text-center cursor-pointer transition-all hover:border-primary/50 hover:bg-primary/5"
+          >
+            <div class="mb-3 mx-auto w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center text-primary">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </div>
+            <p class="font-medium text-text text-sm">{{ t('scanner.takePhoto') }}</p>
+          </button>
+
+          <!-- Upload button -->
+          <div
+            @click="openFilePicker"
+            @dragover.prevent="isDragging = true"
+            @dragleave="isDragging = false"
+            @drop.prevent="handleDrop"
+            :class="[
+              'flex-1 border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-all',
+              isDragging
+                ? 'border-primary bg-primary/5'
+                : 'border-border hover:border-primary/50 hover:bg-primary/5'
+            ]"
+          >
+            <div class="mb-3 mx-auto w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center text-primary">
+              <Icons name="scanner" :size="24" />
+            </div>
+            <p class="font-medium text-text text-sm">{{ t('scanner.uploadLabel') }}</p>
+          </div>
         </div>
-        <p class="font-medium text-text mb-1">{{ t('scanner.uploadLabel') }}</p>
-        <p class="text-text-muted text-sm mb-4">{{ t('scanner.uploadHint') }}</p>
-        <p class="text-text-muted text-xs">{{ t('food.photoUpload.fileTypes') }}</p>
+
+        <p class="text-text-muted text-sm text-center">{{ t('scanner.uploadHint') }}</p>
       </div>
+
+      <!-- Camera Viewfinder Overlay -->
+      <Teleport to="body">
+        <div
+          v-if="camera.isOpen.value"
+          class="fixed inset-0 z-50 bg-black flex flex-col"
+        >
+          <!-- Camera feed -->
+          <video
+            :ref="(el: any) => { camera.videoRef.value = el }"
+            autoplay
+            playsinline
+            class="flex-1 object-cover"
+          ></video>
+
+          <!-- Controls -->
+          <div class="absolute bottom-0 inset-x-0 pb-8 pt-4 bg-gradient-to-t from-black/80 to-transparent flex items-center justify-center gap-8">
+            <!-- Close button -->
+            <button
+              @click="camera.close()"
+              class="w-12 h-12 rounded-full bg-white/20 text-white flex items-center justify-center hover:bg-white/30 transition-colors"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+
+            <!-- Capture button -->
+            <button
+              @click="capturePhoto"
+              class="w-16 h-16 rounded-full bg-white border-4 border-white/50 flex items-center justify-center hover:scale-105 transition-transform"
+            >
+              <div class="w-12 h-12 rounded-full bg-white"></div>
+            </button>
+
+            <!-- Spacer for alignment -->
+            <div class="w-12"></div>
+          </div>
+
+          <!-- Error -->
+          <p v-if="camera.error.value" class="absolute top-4 inset-x-4 text-center text-white bg-alert/80 rounded-lg p-3 text-sm">
+            {{ camera.error.value }}
+          </p>
+        </div>
+      </Teleport>
 
       <!-- Error result -->
       <div v-if="scanResult && !scanResult.success" class="card border-alert/20 bg-alert/5">

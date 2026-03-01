@@ -25,7 +25,8 @@ public class ProductsController : ControllerBase
     [HttpPost("scan")]
     public async Task<ActionResult<ProductScanResultDto>> ScanLabel(
         IFormFile photo,
-        [FromQuery] string locale = "en")
+        [FromQuery] string locale = "en",
+        [FromQuery] bool useLocal = false)
     {
         if (photo.Length == 0)
             return BadRequest(new { error = "Photo file is empty" });
@@ -39,7 +40,7 @@ public class ProductsController : ControllerBase
         Stream? photoStream = photo.OpenReadStream();
         try
         {
-            var result = await _scannerService.ScanProductLabelAsync(userId, photoStream, locale);
+            var result = await _scannerService.ScanProductLabelAsync(userId, photoStream, locale, useLocal);
 
             if (!result.Success)
                 return BadRequest(result);

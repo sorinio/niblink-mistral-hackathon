@@ -89,6 +89,33 @@ public class MistralAIProvider : IAIProvider
         }
         """;
 
+    private const string LabelExtractionPrompt = """
+        You are an OCR and ingredient extraction assistant. This image shows a PRODUCT LABEL or packaging.
+        Your job is to READ THE PRINTED TEXT on the label — do NOT guess ingredients from the product photo.
+
+        Steps:
+        1. Find the product name printed on the packaging and put it in "description"
+        2. Find the ingredient list (often titled "Ingredients:", "Zutaten:", or similar)
+        3. Extract EVERY ingredient exactly as printed on the label
+
+        For each ingredient, provide:
+        - name: the ingredient name as printed (lowercase, singular form)
+        - confidence: 1.0 if clearly readable, lower if text is blurry
+        - category: the food category (vegetable, fruit, grain, legume, dairy, protein, spice, oil, additive, other)
+        - quantity: null (labels don't list per-ingredient quantities)
+        - estimatedGrams: null
+
+        IMPORTANT: Only list ingredients you can actually READ on the label. Do NOT invent or guess ingredients.
+
+        Respond ONLY with valid JSON in this exact format:
+        {
+            "description": "Product Name from label",
+            "ingredients": [
+                {"name": "ingredient from label", "confidence": 1.0, "category": "category", "quantity": null, "estimatedGrams": null}
+            ]
+        }
+        """;
+
     public MistralAIProvider(
         HttpClient httpClient,
         IOptions<MistralSettings> settings,
@@ -118,7 +145,7 @@ public class MistralAIProvider : IAIProvider
             var request = CreateChatRequest(_settings.TextModel, new object[]
             {
                 new { role = "user", content = ExtractionPrompt + localeInstruction + "\n\n" + mealDescription }
-            });
+            }, jsonMode: true);
 
             return await SendRequestAndParseIngredients(request);
         }
@@ -134,7 +161,7 @@ public class MistralAIProvider : IAIProvider
         }
     }
 
-    public async Task<IngredientExtractionResult> ExtractIngredientsFromImageAsync(Stream image, string? hint = null, string locale = "en")
+    public async Task<IngredientExtractionResult> ExtractIngredientsFromImageAsync(Stream image, string? hint = null, string locale = "en", bool useLocal = false)
     {
         try
         {
@@ -144,30 +171,68 @@ public class MistralAIProvider : IAIProvider
             var base64Image = Convert.ToBase64String(imageBytes);
 
             var localeInstruction = GetLocaleInstruction(locale);
-            var prompt = hint != null
-                ? $"{ImageExtractionPrompt}{localeInstruction}\n\nAdditional context: {hint}"
-                : $"{ImageExtractionPrompt}{localeInstruction}";
+            var isLabelScan = hint != null &&
+                (hint.Contains("label", StringComparison.OrdinalIgnoreCase) ||
+                 hint.Contains("Zutatenliste", StringComparison.OrdinalIgnoreCase) ||
+                 hint.Contains("Etikett", StringComparison.OrdinalIgnoreCase));
 
+            var basePrompt = isLabelScan ? LabelExtractionPrompt : ImageExtractionPrompt;
+            var prompt = hint != null && !isLabelScan
+                ? $"{basePrompt}{localeInstruction}\n\nAdditional context: {hint}"
+                : $"{basePrompt}{localeInstruction}";
+
+            // Text-first ordering helps smaller local models focus on the task
             var contentParts = new object[]
             {
                 new
                 {
-                    type = "image_url",
-                    image_url = new { url = $"data:image/jpeg;base64,{base64Image}" }
+                    type = "text",
+                    text = prompt
                 },
                 new
                 {
-                    type = "text",
-                    text = prompt
+                    type = "image_url",
+                    image_url = new { url = $"data:image/jpeg;base64,{base64Image}" }
                 }
             };
 
-            var request = CreateChatRequest(_settings.VisionModel, new object[]
-            {
-                new { role = "user", content = contentParts }
-            });
+            var model = useLocal ? _settings.LocalVisionModel : _settings.VisionModel;
 
-            return await SendRequestAndParseIngredients(request);
+            // For local models, add a system message to reinforce the task
+            var messages = useLocal && isLabelScan
+                ? new object[]
+                {
+                    new { role = "system", content = "You are an OCR assistant. READ the printed text on product labels. Output ONLY valid JSON. Never guess or invent ingredients — only report what you can read." },
+                    new { role = "user", content = contentParts }
+                }
+                : new object[]
+                {
+                    new { role = "user", content = contentParts }
+                };
+
+            var request = CreateChatRequest(model, messages, jsonMode: true);
+
+            HttpClient? localClient = null;
+            if (useLocal)
+            {
+                localClient = new HttpClient
+                {
+                    BaseAddress = new Uri(_settings.LocalBaseUrl),
+                    Timeout = TimeSpan.FromSeconds(_settings.TimeoutSeconds * 3) // Vision is slower locally
+                };
+            }
+
+            _logger.LogDebug("Sending image extraction request to {Target} (local: {UseLocal})",
+                useLocal ? _settings.LocalBaseUrl : "Mistral cloud", useLocal);
+
+            try
+            {
+                return await SendRequestAndParseIngredients(request, localClient);
+            }
+            finally
+            {
+                localClient?.Dispose();
+            }
         }
         catch (Exception ex)
         {
@@ -181,12 +246,13 @@ public class MistralAIProvider : IAIProvider
         }
     }
 
-    public async Task<InsightGenerationResult> GenerateInsightSummaryAsync(string correlationData, string locale = "en")
+    public async Task<InsightGenerationResult> GenerateInsightSummaryAsync(string correlationData, string locale = "en", bool useLocal = false)
     {
         try
         {
             var localeInstruction = GetLocaleInstruction(locale);
-            var request = CreateChatRequest(_settings.TextModel, new object[]
+            var model = useLocal ? _settings.LocalTextModel : _settings.TextModel;
+            var request = CreateChatRequest(model, new object[]
             {
                 new { role = "user", content = InsightGenerationPrompt + localeInstruction + "\n\n" + correlationData }
             });
@@ -194,10 +260,28 @@ public class MistralAIProvider : IAIProvider
             var json = JsonSerializer.Serialize(request);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-            _logger.LogDebug("Sending insight generation request to Mistral API");
+            // For local AI, create a separate client pointing to Ollama
+            HttpClient client;
+            if (useLocal)
+            {
+                client = new HttpClient
+                {
+                    BaseAddress = new Uri(_settings.LocalBaseUrl),
+                    Timeout = TimeSpan.FromSeconds(_settings.TimeoutSeconds)
+                };
+            }
+            else
+            {
+                client = _httpClient;
+            }
 
-            var response = await _httpClient.PostAsync("/v1/chat/completions", content);
+            _logger.LogDebug("Sending insight generation request to {Target} (local: {UseLocal})",
+                useLocal ? _settings.LocalBaseUrl : "Mistral cloud", useLocal);
+
+            var response = await client.PostAsync("/v1/chat/completions", content);
             var responseBody = await response.Content.ReadAsStringAsync();
+
+            if (useLocal) client.Dispose();
 
             if (!response.IsSuccessStatusCode)
             {
@@ -221,8 +305,19 @@ public class MistralAIProvider : IAIProvider
         }
     }
 
-    private object CreateChatRequest(string model, object[] messages)
+    private object CreateChatRequest(string model, object[] messages, bool jsonMode = false)
     {
+        if (jsonMode)
+        {
+            return new
+            {
+                model,
+                max_tokens = _settings.MaxTokens,
+                messages,
+                response_format = new { type = "json_object" }
+            };
+        }
+
         return new
         {
             model,
@@ -231,14 +326,15 @@ public class MistralAIProvider : IAIProvider
         };
     }
 
-    private async Task<IngredientExtractionResult> SendRequestAndParseIngredients(object request)
+    private async Task<IngredientExtractionResult> SendRequestAndParseIngredients(object request, HttpClient? clientOverride = null)
     {
         var json = JsonSerializer.Serialize(request);
         var content = new StringContent(json, Encoding.UTF8, "application/json");
 
         _logger.LogDebug("Sending request to Mistral API");
 
-        var response = await _httpClient.PostAsync("/v1/chat/completions", content);
+        var client = clientOverride ?? _httpClient;
+        var response = await client.PostAsync("/v1/chat/completions", content);
         var responseBody = await response.Content.ReadAsStringAsync();
 
         if (!response.IsSuccessStatusCode)
@@ -263,6 +359,8 @@ public class MistralAIProvider : IAIProvider
                 "No text content in response"
             );
         }
+
+        _logger.LogDebug("AI raw text response (first 500 chars): {Text}", textContent.Length > 500 ? textContent[..500] : textContent);
 
         var (ingredients, description) = ParseIngredientsFromJson(textContent);
 
@@ -373,8 +471,31 @@ public class MistralAIProvider : IAIProvider
 
     private class ExtractionResponse
     {
+        [JsonConverter(typeof(FlexibleStringConverter))]
         public string? Description { get; set; }
         public List<IngredientItem>? Ingredients { get; set; }
+    }
+
+    /// <summary>
+    /// Accepts a JSON string OR object/array for "description" — local models sometimes
+    /// return {"description": {"name": "..."}} instead of {"description": "..."}.
+    /// </summary>
+    private class FlexibleStringConverter : JsonConverter<string?>
+    {
+        public override string? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            if (reader.TokenType == JsonTokenType.String)
+                return reader.GetString();
+
+            // For objects/arrays, just serialize them back to a string representation
+            using var doc = JsonDocument.ParseValue(ref reader);
+            return doc.RootElement.ToString();
+        }
+
+        public override void Write(Utf8JsonWriter writer, string? value, JsonSerializerOptions options)
+        {
+            writer.WriteStringValue(value);
+        }
     }
 
     private class IngredientItem

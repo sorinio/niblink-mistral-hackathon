@@ -10,4 +10,9 @@ public class MistralSettings
     public string VisionModel { get; set; } = "pixtral-large-latest";
     public int MaxTokens { get; set; } = 2048;
     public int TimeoutSeconds { get; set; } = 60;
+
+    // Local AI (Ollama) — OpenAI-compatible API at /v1/chat/completions
+    public string LocalBaseUrl { get; set; } = "http://localhost:11434";
+    public string LocalTextModel { get; set; } = "mistral-nemo";
+    public string LocalVisionModel { get; set; } = "mistral-small";
 }
