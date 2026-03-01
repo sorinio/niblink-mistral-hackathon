@@ -33,6 +33,26 @@ e71572a (Mar  1, 13:27) Local vision support via Ollama, JSON mode, and label OC
 
 ---
 
+## Screenshots
+
+### Dashboard with Hackathon Features
+![Dashboard](docs/screenshots/niblink-dashboard.png)
+
+### Supermarket Guardian — Product Label Scanner
+| Scan a label | AI analyzes ingredients | Traffic-light safety result |
+|:---:|:---:|:---:|
+| ![Scanner](docs/screenshots/niblink-supermarket-guardian.png) | ![Analyzing](docs/screenshots/niblink-product-label.png) | ![Result](docs/screenshots/niblink-product-label-analysis.png) |
+
+### Meal Advisor Chat with SSE Streaming
+| Suggested prompts | Live streaming response |
+|:---:|:---:|
+| ![Prompts](docs/screenshots/niblink-meal-advisor-prompts.png) | ![Chat](docs/screenshots/niblink-meal-advisor-chat.png) |
+
+### Local AI Privacy Toggle (Ollama)
+![AI Privacy](docs/screenshots/niblink-ai-privacy.png)
+
+---
+
 ## The Privacy Story
 
 > "All AI features — chat, insights, and image analysis — can run fully on-device. Only voice transcription uses the cloud (with browser STT as offline fallback)."
